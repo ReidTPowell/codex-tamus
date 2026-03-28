@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="${TAMUS_PROXY_HOST:-127.0.0.1}"
+PORT="${TAMUS_PROXY_PORT:-8765}"
+BASE_URL="${TAMUS_PROXY_BASE_URL:-http://$HOST:$PORT}"
+UPSTREAM_BASE_URL="${TAMUS_UPSTREAM_BASE_URL:-https://chat-api.tamu.ai/api/v1}"
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_STATE_HOME="$REPO_ROOT/state/codex-home"
+STATE_HOME="${TAMUS_CODEX_HOME:-${CODEX_HOME:-$DEFAULT_STATE_HOME}}"
+PROXY_SCRIPT="${TAMUS_PROXY_SCRIPT:-$REPO_ROOT/lib/tamus-responses-proxy.mjs}"
+LOG_DIR="$STATE_HOME/logs"
+LOG_FILE="$LOG_DIR/tamus-responses-proxy.log"
+PID_FILE="$LOG_DIR/tamus-responses-proxy.pid"
+export TAMUS_CODEX_HOME="$STATE_HOME"
+export CODEX_HOME="$STATE_HOME"
+
+find_pid() {
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    read -r pid <"$PID_FILE" || true
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      printf '%s\n' "$pid"
+      return 0
+    fi
+  fi
+
+  local pid
+  pid="$(pgrep -f "$PROXY_SCRIPT" | head -n 1 || true)"
+  if [[ -n "${pid:-}" ]]; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+
+  return 1
+}
+
+health_ok() {
+  curl -fsS "$BASE_URL/healthz" >/dev/null 2>&1
+}
+
+wait_for_health() {
+  local tries="${1:-25}"
+  local delay="${2:-0.2}"
+  local i
+  for ((i = 0; i < tries; i += 1)); do
+    if health_ok; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+  return 1
+}
+
+cmd_status() {
+  local pid=""
+  pid="$(find_pid || true)"
+  if [[ -n "$pid" ]] && health_ok; then
+    printf 'running pid=%s url=%s upstream=%s\n' "$pid" "$BASE_URL" "$UPSTREAM_BASE_URL"
+    return 0
+  fi
+
+  if [[ -n "$pid" ]]; then
+    printf 'stale pid=%s url=%s\n' "$pid" "$BASE_URL" >&2
+    return 1
+  fi
+
+  printf 'stopped url=%s\n' "$BASE_URL"
+  return 1
+}
+
+cmd_start() {
+  local pid=""
+  pid="$(find_pid || true)"
+  if [[ -n "$pid" ]] && health_ok; then
+    printf 'already running pid=%s url=%s\n' "$pid" "$BASE_URL"
+    return 0
+  fi
+
+  mkdir -p "$LOG_DIR"
+  : >>"$LOG_FILE"
+  if command -v setsid >/dev/null 2>&1; then
+    setsid -f node "$PROXY_SCRIPT" >>"$LOG_FILE" 2>&1 </dev/null
+  else
+    nohup node "$PROXY_SCRIPT" >>"$LOG_FILE" 2>&1 </dev/null &
+  fi
+
+  if wait_for_health; then
+    pid="$(find_pid || true)"
+    printf 'started pid=%s url=%s upstream=%s\n' "${pid:-unknown}" "$BASE_URL" "$UPSTREAM_BASE_URL"
+    return 0
+  fi
+
+  printf 'failed to start proxy; check %s\n' "$LOG_FILE" >&2
+  return 1
+}
+
+cmd_stop() {
+  local pid=""
+  pid="$(find_pid || true)"
+  if [[ -z "$pid" ]]; then
+    printf 'already stopped url=%s\n' "$BASE_URL"
+    return 0
+  fi
+
+  kill "$pid"
+  local i
+  for ((i = 0; i < 25; i += 1)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$PID_FILE"
+      printf 'stopped pid=%s\n' "$pid"
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  printf 'failed to stop pid=%s cleanly\n' "$pid" >&2
+  return 1
+}
+
+cmd_restart() {
+  cmd_stop >/dev/null || true
+  cmd_start
+}
+
+cmd_logs() {
+  local lines="${1:-40}"
+  tail -n "$lines" "$LOG_FILE"
+}
+
+usage() {
+  cat <<'EOF'
+Usage: tamus-proxy <status|start|stop|restart|logs> [args]
+EOF
+}
+
+subcommand="${1:-status}"
+case "$subcommand" in
+  status)
+    cmd_status
+    ;;
+  start)
+    cmd_start
+    ;;
+  stop)
+    cmd_stop
+    ;;
+  restart)
+    cmd_restart
+    ;;
+  logs)
+    cmd_logs "${2:-40}"
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

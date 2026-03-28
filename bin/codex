@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$SOURCE_DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+STATE_DIR="$REPO_ROOT/state"
+TAMUS_CODEX_HOME="${TAMUS_CODEX_HOME:-$STATE_DIR/codex-home}"
+REAL_CODEX_BIN_FILE="$STATE_DIR/real-codex-bin"
+LOCAL_TAMUS_MODEL="protected.gpt-5.2"
+LOCAL_TAMUS_PROVIDER="tamus"
+LOCAL_TAMUS_PROXY_URL="${TAMUS_PROXY_BASE_URL:-http://127.0.0.1:8765}"
+
+resolve_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$1"
+  else
+    readlink -f "$1"
+  fi
+}
+
+find_real_codex() {
+  local self resolved candidate
+  self="$(resolve_path "$0")"
+  IFS=':' read -r -a path_parts <<<"${PATH:-}"
+  for dir in "${path_parts[@]}"; do
+    [[ -n "${dir:-}" ]] || continue
+    candidate="$dir/codex"
+    [[ -x "$candidate" ]] || continue
+    resolved="$(resolve_path "$candidate")"
+    [[ "$resolved" == "$self" ]] && continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+ensure_real_codex_bin() {
+  if [[ -f "$REAL_CODEX_BIN_FILE" ]]; then
+    cat "$REAL_CODEX_BIN_FILE"
+    return 0
+  fi
+
+  local detected=""
+  detected="$(find_real_codex || true)"
+  if [[ -z "$detected" ]]; then
+    printf 'Failed to locate the real codex binary. Re-run install.sh.\n' >&2
+    exit 1
+  fi
+
+  mkdir -p "$STATE_DIR"
+  printf '%s\n' "$detected" >"$REAL_CODEX_BIN_FILE"
+  printf '%s\n' "$detected"
+}
+
+augment_path_for_vendor_binary() {
+  local binary="$1"
+  local vendor_root
+  vendor_root="$(cd "$(dirname "$binary")/.." && pwd)"
+  if [[ -d "$vendor_root/path" ]]; then
+    export PATH="$vendor_root/path:$PATH"
+  fi
+}
+
+ensure_tamus_home() {
+  mkdir -p "$TAMUS_CODEX_HOME"
+  if [[ -f "$HOME/.codex/auth.json" && ! -f "$TAMUS_CODEX_HOME/auth.json" ]]; then
+    cp "$HOME/.codex/auth.json" "$TAMUS_CODEX_HOME/auth.json"
+  fi
+  if [[ -f "$HOME/.codex/version.json" && ! -f "$TAMUS_CODEX_HOME/version.json" ]]; then
+    cp "$HOME/.codex/version.json" "$TAMUS_CODEX_HOME/version.json"
+  fi
+}
+
+has_model_flag() {
+  local arg
+  for arg in "$@"; do
+    [[ "$arg" == "--model" || "$arg" == "-m" ]] && return 0
+  done
+  return 1
+}
+
+is_tui_launch() {
+  local args=("$@")
+  local non_tui_subcommands=(
+    exec
+    review
+    login
+    logout
+    mcp
+    mcp-server
+    app-server
+    completion
+    sandbox
+    debug
+    apply
+    features
+    help
+  )
+  local no_value_flags=(
+    --oss
+    --full-auto
+    --dangerously-bypass-approvals-and-sandbox
+    --search
+    --no-alt-screen
+  )
+  local takes_value_flags=(
+    -c
+    --config
+    --enable
+    --disable
+    --remote
+    --remote-auth-token-env
+    -i
+    --image
+    -m
+    --model
+    --local-provider
+    -p
+    --profile
+    -s
+    --sandbox
+    -a
+    --ask-for-approval
+    -C
+    --cd
+    --add-dir
+  )
+  local arg flag
+  local subcommand
+
+  [[ -t 0 && -t 1 ]] || return 1
+
+  for arg in "${args[@]}"; do
+    [[ "$arg" == "--help" || "$arg" == "-h" || "$arg" == "--version" || "$arg" == "-V" ]] && return 1
+  done
+
+  while [[ ${#args[@]} -gt 0 ]]; do
+    arg="${args[0]}"
+    args=("${args[@]:1}")
+
+    if [[ -z "$arg" ]]; then
+      continue
+    fi
+
+    if [[ "$arg" == --*=* ]]; then
+      continue
+    fi
+
+    for flag in "${takes_value_flags[@]}"; do
+      if [[ "$arg" == "$flag" ]]; then
+        [[ ${#args[@]} -gt 0 ]] && args=("${args[@]:1}")
+        continue 2
+      fi
+    done
+
+    for flag in "${no_value_flags[@]}"; do
+      [[ "$arg" == "$flag" ]] && continue 2
+    done
+
+    if [[ "$arg" == -* ]]; then
+      return 0
+    fi
+
+    for subcommand in "${non_tui_subcommands[@]}"; do
+      [[ "$arg" == "$subcommand" ]] && return 1
+    done
+
+    return 0
+  done
+
+  return 0
+}
+
+warn_for_terminal() {
+  local term_value="${TERM:-}"
+
+  if [[ -z "$term_value" || "$term_value" == "dumb" ]]; then
+    cat >&2 <<EOF
+Warning: codex --tamus is starting the interactive TUI, but TERM is '${term_value:-<unset>}'.
+The screen may look blank or Codex may refuse to start.
+
+Try one of:
+  export TERM=xterm-256color
+  codex --tamus --no-alt-screen
+EOF
+    return 0
+  fi
+
+  if [[ -n "${SSH_TTY:-}" ]]; then
+    cat >&2 <<'EOF'
+Note: if the SSH terminal looks blank, rerun with:
+  codex --tamus --no-alt-screen
+EOF
+  fi
+}
+
+wants_tamus=false
+forwarded_args=()
+for arg in "$@"; do
+  if [[ "$arg" == "--tamus" ]]; then
+    wants_tamus=true
+    continue
+  fi
+  forwarded_args+=("$arg")
+done
+
+REAL_CODEX_BIN="$(ensure_real_codex_bin)"
+augment_path_for_vendor_binary "$REAL_CODEX_BIN"
+
+if ! $wants_tamus; then
+  exec "$REAL_CODEX_BIN" "${forwarded_args[@]}"
+fi
+
+ensure_tamus_home
+export CODEX_HOME="$TAMUS_CODEX_HOME"
+export TAMUS_CODEX_HOME="$TAMUS_CODEX_HOME"
+
+node "$REPO_ROOT/lib/sync-tamus-model-cache.mjs" --enable
+"$REPO_ROOT/bin/tamus-proxy" start >/dev/null
+
+if is_tui_launch "${forwarded_args[@]}"; then
+  warn_for_terminal
+fi
+
+injected_args=(
+  "--config" "model_provider=\"$LOCAL_TAMUS_PROVIDER\""
+  "--config" "model_providers.$LOCAL_TAMUS_PROVIDER.name=\"TAMU Local Responses Proxy\""
+  "--config" "model_providers.$LOCAL_TAMUS_PROVIDER.base_url=\"$LOCAL_TAMUS_PROXY_URL\""
+  "--config" "model_providers.$LOCAL_TAMUS_PROVIDER.wire_api=\"responses\""
+  "--config" "model_providers.$LOCAL_TAMUS_PROVIDER.env_key=\"TAMUS_API_KEY\""
+)
+
+if ! has_model_flag "${forwarded_args[@]}"; then
+  injected_args+=("--config" "model=\"$LOCAL_TAMUS_MODEL\"")
+fi
+
+exec "$REAL_CODEX_BIN" "${injected_args[@]}" "${forwarded_args[@]}"
