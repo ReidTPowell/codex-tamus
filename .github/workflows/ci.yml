@@ -23,8 +23,10 @@ jobs:
         run: ./scripts/smoke-test.sh --static-only
 
   live-smoke:
-    if: ${{ github.event_name == 'workflow_dispatch' && secrets.TAMUS_API_KEY != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
+    env:
+      TAMUS_API_KEY: ${{ secrets.TAMUS_API_KEY }}
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -42,9 +44,14 @@ jobs:
           export PATH="$HOME/bin:$PATH"
           ./install.sh
 
+      - name: Require TAMUS_API_KEY
+        run: |
+          if [[ -z "${TAMUS_API_KEY:-}" ]]; then
+            echo "Repository secret TAMUS_API_KEY is not set."
+            exit 1
+          fi
+
       - name: Run live smoke test
-        env:
-          TAMUS_API_KEY: ${{ secrets.TAMUS_API_KEY }}
         run: |
           export PATH="$HOME/bin:$PATH"
           ./scripts/smoke-test.sh
