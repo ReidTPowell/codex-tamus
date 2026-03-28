@@ -108,11 +108,53 @@ After install and token setup:
 ./scripts/smoke-test.sh
 ```
 
+Static validation only:
+
+```bash
+./scripts/smoke-test.sh --static-only
+```
+
+## CI
+
+GitHub Actions includes:
+
+- `validate`: runs on pushes and pull requests, and performs static verification only
+- `live-smoke`: manual `workflow_dispatch` job that installs stock Codex and runs the end-to-end smoke test when `TAMUS_API_KEY` is configured as a repository secret
+
+Recommended repository secret:
+
+- `TAMUS_API_KEY`
+
+## Sharing and access
+
+For a personal repository:
+
+1. Open repository `Settings`
+2. Go to `Collaborators`
+3. Add GitHub usernames individually
+
+For a TAMU organization repository:
+
+1. Transfer the repository to the org
+2. Create or reuse a GitHub team
+3. Grant team access at the repository level
+4. Store `TAMUS_API_KEY` as an org or repo secret only if you want to use the manual `live-smoke` workflow
+
 ## Security notes
 
 - This repo intentionally does not track `state/`.
 - The proxy only reads `TAMUS_API_KEY`. It does not fall back to `OPENAI_API_KEY`.
-- Upload this to a private TAMU/team repository unless your org explicitly approves public distribution.
+- Do not commit real tokens into the repository.
+- If TAMU policy requires restricted distribution, keep the repository private or move it into a TAMU-managed organization.
+
+## Releases
+
+Suggested release flow:
+
+```bash
+git tag -a v0.1.0 -m "codex-tamus v0.1.0"
+git push origin v0.1.0
+```
 
 ## Known limitations
 

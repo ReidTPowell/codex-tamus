@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Run static smoke checks
+        run: ./scripts/smoke-test.sh --static-only
+
+  live-smoke:
+    if: ${{ github.event_name == 'workflow_dispatch' && secrets.TAMUS_API_KEY != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex
+
+      - name: Install overlay
+        run: |
+          export PATH="$HOME/bin:$PATH"
+          ./install.sh
+
+      - name: Run live smoke test
+        env:
+          TAMUS_API_KEY: ${{ secrets.TAMUS_API_KEY }}
+        run: |
+          export PATH="$HOME/bin:$PATH"
+          ./scripts/smoke-test.sh
